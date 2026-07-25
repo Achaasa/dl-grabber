@@ -1,22 +1,12 @@
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import type { ExtractorSettings } from '../types/index.js';
 import path from 'path';
-import fs from 'fs';
 
-function findChromiumExecutable(): string | undefined {
-  const homeDir = process.env.USERPROFILE || process.env.HOME || '';
-  if (!homeDir) return undefined;
-
-  const baseDir = path.join(homeDir, 'AppData', 'Local', 'ms-playwright');
-  if (!fs.existsSync(baseDir)) return undefined;
-
-  const dirs = fs.readdirSync(baseDir).filter((d) => d.startsWith('chromium-') && !d.includes('headless'));
-  for (const dir of dirs) {
-    const exe = path.join(baseDir, dir, 'chrome-win64', 'chrome.exe');
-    if (fs.existsSync(exe)) return exe;
-  }
-
-  return undefined;
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  const p = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || process.env.USERPROFILE || '', 'ms-playwright')
+    : path.join(process.env.HOME || '/opt/render/project', '.cache', 'playwright');
+  process.env.PLAYWRIGHT_BROWSERS_PATH = p;
 }
 
 export class BrowserManager {
@@ -30,10 +20,8 @@ export class BrowserManager {
 
   async initialize(): Promise<void> {
     if (!this.browser) {
-      const executablePath = findChromiumExecutable();
       this.browser = await chromium.launch({
         headless: this.settings.headless,
-        executablePath,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
