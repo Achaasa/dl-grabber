@@ -2,8 +2,10 @@ services:
   - type: web
     name: dl-extractor
     env: node
-    buildCommand: cd frontend && npm install && npm run build && cd ../backend && npm install && npx playwright install chromium && npm run build
+    buildCommand: cd frontend && npm install && npm run build && cd ../backend && npm install && npx playwright install --with-deps chromium chromium-headless-shell && npm run build
     startCommand: cd backend && node dist/index.js
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/.cache/ms-playwright
