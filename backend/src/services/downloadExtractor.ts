@@ -63,6 +63,12 @@ export async function extractDownloadUrl(
 
     debug.push(`HTMX endpoint: ${endpoint}`);
 
+    const isAdUrl = (u: string) =>
+      /hola\.org|mydownloadsitecenter\.com|exoclick|popads|adf\.ly|sh\.st|short\.link|bit\.ly/i.test(u);
+
+    const isDownloadUrl = (u: string) =>
+      /\.(rar|zip|7z|iso|bin|apk|exe|dmg)(\?|$)/i.test(u) || u.includes('dl.fuckingfast.co');
+
     // Block actual file downloads to save bandwidth — URLs are still captured via JS interception below
     await page.route(/\.(rar|zip|7z|iso|bin)(\?|$)/i, (route) => route.abort()).catch(() => {});
     await page.route('**/dl.fuckingfast.co/**', (route) => route.abort()).catch(() => {});
@@ -155,6 +161,14 @@ export async function extractDownloadUrl(
       const exists = await btn.count().catch(() => 0);
       if (!exists) { debug.push('Button gone'); break; }
 
+      // Wait before clicking to let Cloudflare session stabilize
+      if (attempt === 0) {
+        await page.waitForTimeout(3000);
+      } else {
+        await page.waitForTimeout(2000);
+      }
+      if (gone(start)) break;
+
       debug.push(`Click ${attempt + 1}...`);
 
       // Set up Playwright-level interception
@@ -162,10 +176,14 @@ export async function extractDownloadUrl(
       const navPromise = page.waitForNavigation({ timeout: 12000, waitUntil: 'domcontentloaded' }).then(() => page.url()).catch(() => '');
       const popupPromise = page.context().waitForEvent('page', { timeout: 12000 }).catch(() => null) as Promise<any>;
 
+      let htmxCloudflared = false;
       const capturedPlaywrightUrls: string[] = [];
       const respHandler = (resp: { url: () => string; headers: () => Record<string, string> }) => {
         const u = resp.url();
         const h = resp.headers();
+        if (u.includes('/f/') && (h['content-type'] || '').includes('text/html')) {
+          htmxCloudflared = true;
+        }
         if (h['hx-redirect'] || h['HX-Redirect']) {
           const r = h['hx-redirect'] || h['HX-Redirect'] || '';
           debug.push(`HX-Redirect: ${r}`);
@@ -188,20 +206,32 @@ export async function extractDownloadUrl(
 
       page.removeListener('response', respHandler);
 
+      // Check if the HTMX response was Cloudflare — retry without counting
+      const lastBody = await page.evaluate(() => (window as any).__lastResponseBody || '').catch(() => '') as string;
+      const lastUrl = await page.evaluate(() => (window as any).__lastResponseUrl || '').catch(() => '') as string;
+      if (lastUrl.includes('/f/') && (lastBody.includes('Just a moment') || lastBody.includes('Checking your browser'))) {
+        debug.push(`HTMX request blocked by Cloudflare, will retry`);
+        // Still check HX-Redirect in case it arrived before Cloudflare
+        for (const u of capturedPlaywrightUrls) {
+          if (isDownloadUrl(u)) return { url: u, debug };
+        }
+        continue;
+      }
+
       // Check Playwright-level captures (HX-Redirect URLs include dl.fuckingfast.co — accept those)
       for (const u of capturedPlaywrightUrls) {
-        if (u.startsWith('http') && u !== 'about:blank' && (!u.includes('fuckingfast.co') || u.includes('dl.fuckingfast.co'))) return { url: u, debug };
+        if (isDownloadUrl(u)) return { url: u, debug };
       }
 
       // Check download event
       const dl = await dlPromise;
-      if (dl) { const u = dl.url(); if (u && u !== 'about:blank') return { url: u, debug }; }
+      if (dl) { const u = dl.url(); if (isDownloadUrl(u)) return { url: u, debug }; }
 
       // Check navigation
       const navUrl = await navPromise;
-      if (navUrl && navUrl.startsWith('http') && !navUrl.includes('fuckingfast.co')) return { url: navUrl, debug };
+      if (navUrl && isDownloadUrl(navUrl)) return { url: navUrl, debug };
 
-      // Check popup
+      // Check popup — only accept real download URLs, not ads
       const popup = await popupPromise;
       if (popup) {
         try {
@@ -212,8 +242,12 @@ export async function extractDownloadUrl(
             const pu = popup.url();
             if (pu && pu !== 'about:blank' && pu.startsWith('http')) {
               debug.push(`Popup navigated to: ${pu}`);
-              if (!pu.includes('fuckingfast.co')) {
-                try { await popup.close(); } catch {} 
+              if (isDownloadUrl(pu) && !isAdUrl(pu)) {
+                try { await popup.close(); } catch {}
+                return { url: pu, debug };
+              }
+              if (!isAdUrl(pu) && !pu.includes('fuckingfast.co')) {
+                try { await popup.close(); } catch {}
                 return { url: pu, debug };
               }
               break;
@@ -223,7 +257,7 @@ export async function extractDownloadUrl(
             Array.from(document.querySelectorAll('a[href]')).map((a) => (a as HTMLAnchorElement).href)
           ).catch(() => []);
           for (const l of popupLinks) {
-            if (/\.(rar|zip|7z|iso|bin)/i.test(l)) { try { await popup.close(); } catch {}; return { url: l, debug }; }
+            if (isDownloadUrl(l)) { try { await popup.close(); } catch {}; return { url: l, debug }; }
           }
           try { await popup.close(); } catch {}
         } catch { try { await popup.close(); } catch {} }
@@ -234,14 +268,11 @@ export async function extractDownloadUrl(
       if (hijacked.length > 0) {
         debug.push(`Hijacked URLs: ${JSON.stringify(hijacked)}`);
         for (const u of hijacked) {
-          if (u.startsWith('http') && !u.includes('fuckingfast.co') && u !== 'about:blank') return { url: u, debug };
-          if (u.startsWith('http') && u.includes('dl.fuckingfast.co')) return { url: u, debug };
+          if (isDownloadUrl(u)) return { url: u, debug };
         }
       }
 
-      // Check the last response body
-      const lastBody = await page.evaluate(() => (window as any).__lastResponseBody || '').catch(() => '') as string;
-      const lastUrl = await page.evaluate(() => (window as any).__lastResponseUrl || '').catch(() => '') as string;
+      // Check the last response body for download URLs
       if (lastBody) {
         debug.push(`Last response: ${lastUrl} -> ${lastBody.slice(0, 200)}`);
         const urlMatch = lastBody.match(/https?:\/\/dl\.fuckingfast\.co\/dl\/[^\s"<>']+/);
@@ -265,7 +296,6 @@ export async function extractDownloadUrl(
       if (textUrl) return { url: textUrl, debug };
 
       debug.push(`Click ${attempt + 1}: no result`);
-      await page.waitForTimeout(1000);
     }
 
     return done(debug, 'all clicks exhausted');
@@ -283,14 +313,14 @@ async function tryClicks(page: Page, debug: string[], start: number): Promise<st
     await btn.click({ timeout: 3000, force: true }).catch(() => {});
     await page.waitForTimeout(3000);
     const u = page.url();
-    if (u.startsWith('http') && !u.includes('fuckingfast.co')) return u;
+    if (u.startsWith('http') && !u.includes('fuckingfast.co') && !u.includes('hola.org')) return u;
   }
   return null;
 }
 
 function elapsed(start: number): number { return Date.now() - start; }
 
-function gone(start: number): boolean { return Date.now() - start > 35000; }
+function gone(start: number): boolean { return Date.now() - start > 45000; }
 
 function done(debug: string[], msg: string): DownloadResult {
   debug.push(msg);
