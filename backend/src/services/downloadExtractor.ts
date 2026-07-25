@@ -20,6 +20,22 @@ export async function extractDownloadUrl(
 
     debug.push(`URL: ${page.url()}`);
 
+    // Handle Cloudflare challenge
+    const title = await page.title().catch(() => '');
+    if (title.toLowerCase().includes('just a moment') || title.toLowerCase().includes('checking your browser')) {
+      debug.push(`Cloudflare challenge detected: "${title}"`);
+      try {
+        await page.waitForFunction(
+          () => !document.title.toLowerCase().includes('just a moment') && !document.title.toLowerCase().includes('checking your browser'),
+          { timeout: 25000, polling: 500 },
+        );
+        debug.push(`Cloudflare challenge resolved, title: "${await page.title()}"`);
+      } catch {
+        debug.push('Cloudflare challenge did not resolve within timeout');
+        return done(debug, 'cloudflare timeout');
+      }
+    }
+
     // Check direct links
     const direct = await page.evaluate(() =>
       Array.from(document.querySelectorAll('a[href]')).map((a) => (a as HTMLAnchorElement).href).filter((h) => /\.(rar|zip|7z|iso|bin)(\?|$)/i.test(h))
